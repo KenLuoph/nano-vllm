@@ -9,6 +9,7 @@ from nanovllm.engine.sequence import Sequence
 from nanovllm.models.qwen3 import Qwen3ForCausalLM
 from nanovllm.layers.sampler import Sampler
 from nanovllm.utils.context import set_context, get_context, reset_context
+from nanovllm.utils.decode_profiler import DecodeProfiler
 from nanovllm.utils.loader import load_model
 
 
@@ -22,6 +23,7 @@ class ModelRunner:
         self.world_size = config.tensor_parallel_size
         self.rank = rank
         self.event = event
+        self.decode_profiler = DecodeProfiler(rank)
 
         dist.init_process_group("nccl", "tcp://localhost:2333", world_size=self.world_size, rank=rank)
         torch.cuda.set_device(rank)
@@ -48,6 +50,8 @@ class ModelRunner:
                 self.loop()
 
     def exit(self):
+        if self.decode_profiler.enabled:
+            self.decode_profiler.stop()
         if self.world_size > 1:
             self.shm.close()
             dist.barrier()
@@ -57,6 +61,12 @@ class ModelRunner:
             del self.graphs, self.graph_pool
         torch.cuda.synchronize()
         dist.destroy_process_group()
+
+    def start_profile(self, output_path: str, variant: str, nvtx: bool = True):
+        return self.decode_profiler.start(output_path, variant, nvtx)
+
+    def stop_profile(self):
+        return self.decode_profiler.stop()
 
     def loop(self):
         while True:
@@ -121,10 +131,15 @@ class ModelRunner:
                 layer_id += 1
 
     def prepare_block_tables(self, seqs: list[Sequence]):
-        max_len = max(len(seq.block_table) for seq in seqs)
-        block_tables = [seq.block_table + [-1] * (max_len - len(seq.block_table)) for seq in seqs]
-        block_tables = torch.tensor(block_tables, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        return block_tables
+        with self.decode_profiler.range("prepare_block_tables", "prepare_block_tables_cpu_ms"):
+            max_len = max(len(seq.block_table) for seq in seqs)
+            block_tables = [seq.block_table + [-1] * (max_len - len(seq.block_table)) for seq in seqs]
+            block_tables = torch.tensor(block_tables, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
+            self.decode_profiler.update(
+                block_table_width=max_len,
+                block_table_elements=len(seqs) * max_len,
+            )
+            return block_tables
 
     def prepare_prefill(self, seqs: list[Sequence]):
         input_ids = []
@@ -170,54 +185,78 @@ class ModelRunner:
         return input_ids, positions
 
     def prepare_decode(self, seqs: list[Sequence]):
-        input_ids = []
-        positions = []
-        slot_mapping = []
-        context_lens = []
-        for seq in seqs:
-            input_ids.append(seq.last_token)
-            positions.append(len(seq) - 1)
-            context_lens.append(len(seq))
-            slot_mapping.append(seq.block_table[-1] * self.block_size + seq.last_block_num_tokens  - 1)
-        input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
-        positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
-        slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        context_lens = torch.tensor(context_lens, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        block_tables = self.prepare_block_tables(seqs)
-        set_context(False, slot_mapping=slot_mapping, context_lens=context_lens, block_tables=block_tables)
-        return input_ids, positions
+        with self.decode_profiler.range("prepare_decode", "prepare_decode_cpu_ms"):
+            input_ids = []
+            positions = []
+            slot_mapping = []
+            context_lens = []
+            for seq in seqs:
+                input_ids.append(seq.last_token)
+                positions.append(len(seq) - 1)
+                context_lens.append(len(seq))
+                slot_mapping.append(seq.block_table[-1] * self.block_size + seq.last_block_num_tokens  - 1)
+            input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
+            positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
+            slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
+            context_lens = torch.tensor(context_lens, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
+            block_tables = self.prepare_block_tables(seqs)
+            set_context(False, slot_mapping=slot_mapping, context_lens=context_lens, block_tables=block_tables)
+            return input_ids, positions
 
     def prepare_sample(self, seqs: list[Sequence]):
-        temperatures = [seq.temperature for seq in seqs]
-        temperatures = torch.tensor(temperatures, dtype=torch.float32, pin_memory=True).cuda(non_blocking=True)
-        return temperatures
+        with self.decode_profiler.range("prepare_sample", "prepare_sample_cpu_ms"):
+            temperatures = [seq.temperature for seq in seqs]
+            temperatures = torch.tensor(temperatures, dtype=torch.float32, pin_memory=True).cuda(non_blocking=True)
+            return temperatures
 
     @torch.inference_mode()
     def run_model(self, input_ids: torch.Tensor, positions: torch.Tensor, is_prefill: bool):
         if is_prefill or self.enforce_eager or input_ids.size(0) > 512:
-            return self.model.compute_logits(self.model(input_ids, positions))
+            with self.decode_profiler.range("eager_model_and_logits", "eager_model_and_logits_cpu_ms"):
+                return self.model.compute_logits(self.model(input_ids, positions))
         else:
             bs = input_ids.size(0)
             context = get_context()
-            graph = self.graphs[next(x for x in self.graph_bs if x >= bs)]
+            graph_bucket = next(x for x in self.graph_bs if x >= bs)
+            graph = self.graphs[graph_bucket]
             graph_vars = self.graph_vars
-            graph_vars["input_ids"][:bs] = input_ids
-            graph_vars["positions"][:bs] = positions
-            graph_vars["slot_mapping"].fill_(-1)
-            graph_vars["slot_mapping"][:bs] = context.slot_mapping
-            graph_vars["context_lens"].zero_()
-            graph_vars["context_lens"][:bs] = context.context_lens
-            graph_vars["block_tables"][:bs, :context.block_tables.size(1)] = context.block_tables
-            graph.replay()
-            return self.model.compute_logits(graph_vars["outputs"][:bs])
+            self.decode_profiler.update(
+                cuda_graph=True,
+                graph_bucket=graph_bucket,
+                graph_max_batch=self.graph_vars["input_ids"].numel(),
+                graph_block_table_capacity=self.graph_vars["block_tables"].size(1),
+                graph_full_clear_bytes_est=self.graph_vars["slot_mapping"].numel() * 8,
+            )
+            with self.decode_profiler.range("graph_input_copy", "graph_input_copy_cpu_ms"):
+                graph_vars["input_ids"][:bs] = input_ids
+                graph_vars["positions"][:bs] = positions
+                graph_vars["slot_mapping"].fill_(-1)
+                graph_vars["slot_mapping"][:bs] = context.slot_mapping
+                graph_vars["context_lens"].zero_()
+                graph_vars["context_lens"][:bs] = context.context_lens
+                graph_vars["block_tables"][:bs, :context.block_tables.size(1)] = context.block_tables
+            with self.decode_profiler.range("graph_replay", "graph_replay_submit_cpu_ms"):
+                graph.replay()
+            with self.decode_profiler.range("compute_logits", "compute_logits_submit_cpu_ms"):
+                return self.model.compute_logits(graph_vars["outputs"][:bs])
 
     def run(self, seqs: list[Sequence], is_prefill: bool) -> list[int]:
-        input_ids, positions = self.prepare_prefill(seqs) if is_prefill else self.prepare_decode(seqs)
-        temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
-        logits = self.run_model(input_ids, positions, is_prefill)
-        token_ids = self.sampler(logits, temperatures).tolist() if self.rank == 0 else None
-        reset_context()
-        return token_ids
+        self.decode_profiler.begin_step(seqs, is_prefill)
+        error = None
+        try:
+            with self.decode_profiler.range("model_runner_run", "model_runner_run_cpu_ms"):
+                input_ids, positions = self.prepare_prefill(seqs) if is_prefill else self.prepare_decode(seqs)
+                temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
+                logits = self.run_model(input_ids, positions, is_prefill)
+                with self.decode_profiler.range("sample_and_d2h", "sample_and_d2h_cpu_ms"):
+                    token_ids = self.sampler(logits, temperatures).tolist() if self.rank == 0 else None
+            return token_ids
+        except Exception as exc:
+            error = exc
+            raise
+        finally:
+            reset_context()
+            self.decode_profiler.end_step(error)
 
     @torch.inference_mode()
     def capture_cudagraph(self):
