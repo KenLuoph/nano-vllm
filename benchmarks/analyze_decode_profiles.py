@@ -10,6 +10,8 @@ from pathlib import Path
 METRICS = (
     "prepare_decode_cpu_ms",
     "prepare_block_tables_cpu_ms",
+    "numpy_pack_cpu_ms",
+    "block_table_pack_cpu_ms",
     "prepare_sample_cpu_ms",
     "graph_input_copy_cpu_ms",
     "graph_replay_submit_cpu_ms",
@@ -59,6 +61,10 @@ def summarize(path: Path):
         "pr176_staging_clear_bytes_est",
         "pr176_staging_h2d_bytes_est",
         "pr176_scalar_writes_est",
+        "copied_block_table_bytes",
+        "padding_rows",
+        "decode_tensor_allocations",
+        "metadata_d2d_copies",
     ):
         values = [record[metric] for record in decode if metric in record]
         if values:
