@@ -29,12 +29,11 @@ class Scheduler:
         num_batched_tokens = 0
 
         # prefill
-        # Runtime slots are owned for the full RUNNING lifetime, so new prefill
-        # requests may only consume capacity not already held by running requests.
-        while (
-            self.waiting
-            and len(self.running) + len(scheduled_seqs) < self.max_num_seqs
-        ):
+        # Runtime slots are owned for the full RUNNING lifetime. Snapshot the
+        # remaining capacity because final-prefill sequences are appended to
+        # ``running`` inside this loop and must not be counted twice.
+        prefill_capacity = self.max_num_seqs - len(self.running)
+        while self.waiting and len(scheduled_seqs) < prefill_capacity:
             seq = self.waiting[0]
             remaining = self.max_num_batched_tokens - num_batched_tokens
             if remaining == 0:

@@ -104,6 +104,43 @@ class RuntimeSlotTest(unittest.TestCase):
         self.assertEqual(list(scheduler.waiting), [second])
         self.assertEqual(sum(owner is not None for owner in scheduler.runtime_slots.owners), 1)
 
+    def test_preemption_releases_slot_and_reacquire_uses_new_epoch(self):
+        config = SimpleNamespace(
+            max_num_seqs=2,
+            max_num_batched_tokens=8,
+            eos=-1,
+            num_kvcache_blocks=2,
+            kvcache_block_size=4,
+        )
+        scheduler = Scheduler(config)
+        first = Sequence(
+            [1, 2, 3, 4],
+            SamplingParams(max_tokens=2, ignore_eos=True),
+        )
+        second = Sequence(
+            [5, 6, 7, 8],
+            SamplingParams(max_tokens=3, ignore_eos=True),
+        )
+        scheduler.add(first)
+        scheduler.add(second)
+        seqs, is_prefill = scheduler.schedule()
+        scheduler.postprocess(seqs, [9, 10], is_prefill)
+        second_slot = second.runtime_slot
+        second_epoch = second.runtime_slot_epoch
+
+        seqs, is_prefill = scheduler.schedule()
+        self.assertFalse(is_prefill)
+        self.assertEqual(seqs, [first])
+        self.assertEqual(second.runtime_slot, -1)
+        self.assertEqual(list(scheduler.waiting), [second])
+        scheduler.postprocess(seqs, [11], is_prefill)
+
+        seqs, is_prefill = scheduler.schedule()
+        self.assertTrue(is_prefill)
+        self.assertEqual(seqs, [second])
+        self.assertEqual(second.runtime_slot, second_slot)
+        self.assertGreater(second.runtime_slot_epoch, second_epoch)
+
 
 class GpuBlockTableMirrorTest(unittest.TestCase):
     def setUp(self):
@@ -154,6 +191,21 @@ class GpuBlockTableMirrorTest(unittest.TestCase):
         self.assertEqual(len(replacement_deltas), 4)
         self.assertTrue(all(delta.full_row for delta in replacement_deltas))
         self.assertEqual(mirror.master_block_tables[old_slot].tolist(), [31, -1, -1, -1])
+
+    def test_prefix_shared_physical_block_is_valid_in_multiple_runtime_rows(self):
+        slots = RuntimeSlotManager(2)
+        first = Sequence([1, 2, 3, 4, 5])
+        second = Sequence([1, 2, 3, 4, 9])
+        slots.acquire(first)
+        slots.acquire(second)
+        first.block_table = [17, 21]
+        second.block_table = [17, 25]
+        first.block_table_version = second.block_table_version = 1
+        mirror = GpuBlockTableMirror(2, 4, device="cpu")
+        mirror.synchronize([first, second])
+
+        gathered = mirror.gather_reference([first, second], 2, 2)
+        self.assertEqual(gathered.tolist(), [[17, 21], [17, 25]])
 
 
 if __name__ == "__main__":
