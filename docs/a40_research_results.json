@@ -1,0 +1,54 @@
+{
+  "environment": {
+    "device": "NVIDIA A40 GPU 1",
+    "torch": "2.8.0+cu128",
+    "torch_cuda": "12.8",
+    "triton": "3.4.0",
+    "seed": 20260731,
+    "measured_runs": 3,
+    "direct_h2d_enabled": false
+  },
+  "model_revisions": {
+    "Qwen/Qwen3-0.6B": "c1899de289a04d12100db370d81485cdf75e47ca",
+    "Qwen/Qwen3-1.7B": "70d244cc86ccca08cf5af4e1e306ecf908b1ad5e"
+  },
+  "throughput": [
+    {"model": "Qwen3-0.6B", "prompt": 128, "output": 512, "batch": 1, "host_v2_tok_s": 287.09, "gpu_metadata_tok_s": 292.55, "change_percent": 1.90},
+    {"model": "Qwen3-0.6B", "prompt": 128, "output": 512, "batch": 4, "host_v2_tok_s": 1011.93, "gpu_metadata_tok_s": 1040.59, "change_percent": 2.83},
+    {"model": "Qwen3-0.6B", "prompt": 128, "output": 512, "batch": 8, "host_v2_tok_s": 1852.75, "gpu_metadata_tok_s": 1899.32, "change_percent": 2.51},
+    {"model": "Qwen3-0.6B", "prompt": 128, "output": 512, "batch": 16, "host_v2_tok_s": 3154.56, "gpu_metadata_tok_s": 3219.20, "change_percent": 2.05},
+    {"model": "Qwen3-0.6B", "prompt": 2048, "output": 256, "batch": 4, "host_v2_tok_s": 689.55, "gpu_metadata_tok_s": 701.89, "change_percent": 1.79},
+    {"model": "Qwen3-0.6B", "prompt": 2048, "output": 256, "batch": 16, "host_v2_tok_s": 1281.74, "gpu_metadata_tok_s": 1292.42, "change_percent": 0.83},
+    {"model": "Qwen3-1.7B", "prompt": 128, "output": 512, "batch": 1, "host_v2_tok_s": 130.70, "gpu_metadata_tok_s": 131.95, "change_percent": 0.96},
+    {"model": "Qwen3-1.7B", "prompt": 128, "output": 512, "batch": 4, "host_v2_tok_s": 496.82, "gpu_metadata_tok_s": 502.48, "change_percent": 1.14},
+    {"model": "Qwen3-1.7B", "prompt": 128, "output": 512, "batch": 8, "host_v2_tok_s": 941.68, "gpu_metadata_tok_s": 952.52, "change_percent": 1.15},
+    {"model": "Qwen3-1.7B", "prompt": 128, "output": 512, "batch": 16, "host_v2_tok_s": 1675.85, "gpu_metadata_tok_s": 1692.32, "change_percent": 0.98}
+  ],
+  "nsight_batch16_output128": {
+    "host_v2_h2d_submissions": 768,
+    "gpu_metadata_h2d_submissions": 133,
+    "decode_steps": 128,
+    "host_v2_metadata_h2d_per_step": 6,
+    "gpu_metadata_h2d_per_step": 1,
+    "metadata_d2d_per_step": 0
+  },
+  "compact_abi": {
+    "steady_batch16_bytes_before": 544,
+    "steady_batch16_bytes_after": 416,
+    "captured_apply_unpack_us": [3.16, 3.23]
+  },
+  "direct_h2d_tiebreak": {
+    "workload": "Qwen3-0.6B prompt128/output512 batch16",
+    "alternating_rounds": 7,
+    "paired_median_change_percent": 0.043,
+    "independent_median_change_percent": 0.10,
+    "decision": "keep opt-in"
+  },
+  "correctness": {
+    "fixed_cases": 8,
+    "dynamic_churn": true,
+    "host_v2_checksum_match": true,
+    "unit_reference_tests": 21,
+    "eager_and_captured_kernel_checks": "passed"
+  }
+}

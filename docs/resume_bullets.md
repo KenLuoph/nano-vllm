@@ -1,7 +1,7 @@
 # Resume bullets
 
-Only the host-v2 bullets below are ready to use. The Triton bullet is explicitly
-marked pending until the formal A40 matrix passes.
+The host and research bullets below have both passed A40 correctness and
+performance validation. Keep the comparison baseline explicit.
 
 ## English — verified host path
 
@@ -24,9 +24,19 @@ marked pending until the formal A40 matrix passes.
   将 CPU metadata packing 几何中位延迟降低 43.3%，相对 scalar-assignment 方案
   降低 95.2%，并消除 steady-state metadata allocation 与 D2D copy。
 
-## Pending — use only after formal GPU validation
+## English — verified research path
 
 - Designed a versioned GPU-resident KV block-table mirror with stable runtime
   slots and reuse epochs, then co-designed a single packed H2D ABI with captured
-  Triton delta/unpack/gather kernels; **insert only Day-9 verified H2D, latency,
-  and end-to-end numbers here**.
+  Triton delta/unpack/gather kernels; reduced decode metadata H2D submissions
+  from 6 to 1 per token and improved throughput over the optimized host path by
+  1.90%–2.83% on Qwen3-0.6B and 0.96%–1.15% on Qwen3-1.7B, with deterministic
+  checksums under block boundaries and dynamic request churn.
+
+## 中文 — 已验证 research 路径
+
+- 设计带稳定 runtime slot、reuse epoch 与 version delta 的 GPU-resident KV
+  block-table mirror，并联合设计单次 packed H2D ABI 与 CUDA Graph 内 captured
+  Triton delta/unpack/gather kernel；将每 token 的 decode metadata H2D 从 6 次
+  降至 1 次，相对已优化 host 路径在 Qwen3-0.6B 上提升 1.90%–2.83%、在
+  Qwen3-1.7B 上提升 0.96%–1.15%，并通过 block boundary 与动态请求 checksum。

@@ -8,8 +8,9 @@ co-design 项目。先定位到 graph replay 前每个 token 仍在重复创建 
 上 Qwen3-0.6B 的吞吐提升了 3.46%–5.80%，并通过 Nsight 验证 steady-state
 没有 metadata allocation 和 D2D。然后我把研究路线扩展为稳定 runtime slot、
 带 epoch/version 的 GPU block-table mirror、单次 packed H2D，以及 CUDA Graph
-内 captured Triton unpack/gather kernel。研究路径目前必须通过 A40 checksum、
-Nsight 和 IR gate 后，才会写入最终性能结论。
+内 captured Triton unpack/gather kernel。A40 Nsight 验证 metadata H2D 从每步
+6 次降到 1 次且 D2D 为 0；相对 host v2，Qwen3-0.6B/p128/o512 提升
+1.90%–2.83%，Qwen3-1.7B 提升 0.96%–1.15%，所有 checksum 一致。
 
 ## 5 分钟版本结构
 
@@ -78,6 +79,9 @@ gather 当前 batch rows。这样 CPU submission 保持一次 graph replay，编
   0，而 padding block ID 是 -1；context 0 才表示没有 KV 可读。
 - **六次 H2D 合成一次一定更快吗？** 不一定；新增 Triton kernel 也有 GPU 成本，
   必须用端到端与 Nsight 判断，收益受 Amdahl 上限约束。
+- **为什么 direct cudaMemcpyAsync 没默认启用？** microbenchmark 的 CPU
+  submission 快 57%–60%，但 7 轮交替端到端只有 +0.043% paired median；不足以
+  抵消 CUDA runtime ABI 和可移植性复杂度，所以只保留为 research 开关。
 - **为何不用 C++ extension？** NumPy bulk packing 已解决 scalar dispatch；研究
   路线的关键是 GPU-resident ownership/delta，而不是先增加 build complexity。
 - **TP 风险是什么？** 各 rank 都有 staging 与 graph，rank 0 sampler D2H 的同步

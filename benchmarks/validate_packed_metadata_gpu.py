@@ -116,7 +116,6 @@ def main():
     unpack_grid = (triton.cdiv(4 * packed.max_num_blocks, block),)
     unpack_compiled = unpack_decode_metadata_kernel[unpack_grid](
         packed.gpu_words,
-        packed.gpu_blob.view(torch.int64),
         packed.gpu_blob.view(torch.float32),
         mirror.master_block_tables,
         tensors["input_ids"],

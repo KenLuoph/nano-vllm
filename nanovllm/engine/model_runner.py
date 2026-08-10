@@ -198,14 +198,23 @@ class ModelRunner:
             if self.packed_metadata_enabled and len(seqs) <= 512:
                 batch_size = len(seqs)
                 graph_bucket = next(x for x in self.graph_bs if x >= batch_size)
-                deltas = self.gpu_block_table_mirror.plan_deltas(seqs)
-                view = self.packed_decode_metadata.prepare(
-                    seqs,
-                    graph_bucket,
-                    deltas,
-                    include_temperatures=self.rank == 0,
-                )
-                self.packed_decode_metadata.copy_to_gpu(view.active_bytes)
+                with self.decode_profiler.range(
+                    "plan_block_table_deltas", "block_table_delta_plan_cpu_ms"
+                ):
+                    deltas = self.gpu_block_table_mirror.plan_deltas(seqs)
+                with self.decode_profiler.range(
+                    "pack_decode_metadata", "packed_row_pack_cpu_ms"
+                ):
+                    view = self.packed_decode_metadata.prepare(
+                        seqs,
+                        graph_bucket,
+                        deltas,
+                        include_temperatures=self.rank == 0,
+                    )
+                with self.decode_profiler.range(
+                    "copy_packed_metadata", "packed_h2d_submit_cpu_ms"
+                ):
+                    self.packed_decode_metadata.copy_to_gpu(view.active_bytes)
                 self.decode_profiler.update(
                     cuda_graph=True,
                     graph_bucket=graph_bucket,
@@ -390,6 +399,18 @@ class ModelRunner:
             outputs=outputs,
         )
         if self.packed_metadata_enabled:
+            int32_max = torch.iinfo(torch.int32).max
+            packed_bounds = {
+                "vocabulary": hf_config.vocab_size - 1,
+                "position": config.max_model_len - 1,
+                "kv slot": config.num_kvcache_blocks * self.block_size - 1,
+            }
+            for name, upper_bound in packed_bounds.items():
+                if upper_bound > int32_max:
+                    raise ValueError(
+                        f"packed metadata {name} exceeds int32 transport range: "
+                        f"{upper_bound} > {int32_max}"
+                    )
             with torch.inference_mode(False):
                 self.packed_decode_metadata = PackedDecodeMetadata(
                     max_bs,

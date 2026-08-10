@@ -37,8 +37,10 @@ class GpuBlockTableMirror:
             device=self.device,
         )
         self.host_rows = np.full((max_num_seqs, max_num_blocks), -1, dtype=np.int32)
-        self.seen_epochs = np.zeros(max_num_seqs, dtype=np.int64)
-        self.seen_versions = np.full(max_num_seqs, -1, dtype=np.int64)
+        # These are scalar control-plane values; Python lists avoid NumPy scalar
+        # conversion in the per-sequence steady-state loop.
+        self.seen_epochs = [0] * max_num_seqs
+        self.seen_versions = [-1] * max_num_seqs
 
     def plan_deltas(self, seqs: list[Sequence]) -> list[BlockTableDelta]:
         deltas = []

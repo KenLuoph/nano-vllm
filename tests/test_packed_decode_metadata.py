@@ -51,7 +51,7 @@ class PackedDecodeMetadataTest(unittest.TestCase):
             view.active_bytes,
             (HEADER_WORDS + 4 * ROW_WORDS + 3 * DELTA_WORDS) * 4,
         )
-        self.assertEqual(packed.cpu_words[:7].tolist(), [MAGIC, 2, 4, 2, 3, 40, 52])
+        self.assertEqual(packed.cpu_words[:7].tolist(), [MAGIC, 2, 4, 2, 3, 32, 41])
         self.assertEqual(packed.rows["input_id"][:4].tolist(), [5, 8, 0, 0])
         self.assertEqual(packed.rows["position"][:4].tolist(), [4, 2, 0, 0])
         self.assertEqual(packed.rows["slot_mapping"][:4].tolist(), [44, 82, -1, -1])
@@ -60,11 +60,18 @@ class PackedDecodeMetadataTest(unittest.TestCase):
         self.assertTrue(
             np.allclose(packed.rows["temperature"][:4], [0.5, 0.8, 1.0, 1.0])
         )
-        delta_words = packed.cpu_words[40:52].reshape(-1, DELTA_WORDS)
+        delta_words = packed.cpu_words[32:41].reshape(-1, DELTA_WORDS)
         self.assertEqual(
             delta_words.tolist(),
-            [[2, 0, 10, 1], [2, 1, 11, 1], [5, 0, 20, 3]],
+            [[2, 0, 10], [2, 1, 11], [5, 0, 20]],
         )
+
+    def test_compact_transport_layout_uses_int32_rows(self):
+        packed = PackedDecodeMetadata(4, 4, 4, pin_memory=False, device="cpu")
+        self.assertEqual(ROW_WORDS * 4, 24)
+        self.assertEqual(DELTA_WORDS * 4, 12)
+        self.assertEqual(packed.rows.dtype["input_id"].itemsize, 4)
+        self.assertEqual(packed.rows.dtype["position"].itemsize, 4)
 
     def test_single_copy_uses_active_prefix_and_shared_storage(self):
         packed = PackedDecodeMetadata(4, 4, 4, pin_memory=False, device="cpu")

@@ -9,6 +9,8 @@ from time import perf_counter_ns
 import torch
 
 from nanovllm.engine.decode_input_batch import DecodeInputBatch
+from nanovllm.engine.gpu_block_table import GpuBlockTableMirror
+from nanovllm.engine.packed_decode_metadata import PackedDecodeMetadata
 
 
 BATCH_SIZES = (1, 4, 8, 16, 32, 64)
@@ -22,6 +24,10 @@ class BenchmarkSequence:
         self.last_token = 1000 + row
         self.block_table = [row * block_width + column for column in range(block_width)]
         self.temperature = 0.5 + (row % 5) * 0.1
+        self.seq_id = row
+        self.runtime_slot = row
+        self.runtime_slot_epoch = 1
+        self.block_table_version = 1
 
     def __len__(self):
         return self.num_tokens
@@ -136,12 +142,44 @@ def make_v2_packer(seqs, batch_size: int, block_width: int, pin_memory: bool):
     return pack
 
 
+def make_packed_packer(seqs, batch_size: int, block_width: int, pin_memory: bool):
+    packed = PackedDecodeMetadata(
+        batch_size,
+        block_width,
+        BLOCK_SIZE,
+        pin_memory=pin_memory,
+        device="cuda",
+    )
+    mirror = GpuBlockTableMirror(
+        batch_size,
+        block_width,
+        device="cuda",
+    )
+
+    def pack():
+        deltas = mirror.plan_deltas(seqs)
+        return packed.prepare(
+            seqs,
+            batch_size,
+            deltas,
+            include_temperatures=True,
+        )
+
+    return pack
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Compare decode CPU metadata packing paths")
     parser.add_argument("--iterations", type=int, default=10_000)
     parser.add_argument("--warmup", type=int, default=200)
     parser.add_argument("--pin-memory", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--variants",
+        nargs="+",
+        choices=("main", "pr176", "v2_numpy", "packed_gpu_mirror"),
+        default=("main", "pr176", "v2_numpy", "packed_gpu_mirror"),
+    )
     return parser.parse_args()
 
 
@@ -159,8 +197,12 @@ def main():
                 "v2_numpy": make_v2_packer(
                     seqs, batch_size, block_width, args.pin_memory
                 ),
+                "packed_gpu_mirror": make_packed_packer(
+                    seqs, batch_size, block_width, args.pin_memory
+                ),
             }
-            for variant, packer in packers.items():
+            for variant in args.variants:
+                packer = packers[variant]
                 result = {
                     "variant": variant,
                     "batch_size": batch_size,
