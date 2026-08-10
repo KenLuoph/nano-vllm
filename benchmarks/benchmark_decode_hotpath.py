@@ -48,8 +48,11 @@ def make_prompts(batch_size: int, prompt_tokens: int, vocab_size: int, seed: int
 
 
 def git_revision():
+    source_repo = os.environ.get("NANOVLLM_SOURCE_REPO")
     return subprocess.check_output(
-        ["git", "rev-parse", "HEAD"], text=True, cwd=Path(__file__).resolve().parents[1]
+        ["git", "rev-parse", "HEAD"],
+        text=True,
+        cwd=source_repo or Path(__file__).resolve().parents[1],
     ).strip()
 
 

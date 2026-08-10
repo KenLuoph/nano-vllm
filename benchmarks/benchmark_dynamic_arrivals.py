@@ -80,10 +80,11 @@ def model_revision(model, config):
 
 
 def git_revision():
+    source_repo = os.environ.get("NANOVLLM_SOURCE_REPO")
     return subprocess.check_output(
         ["git", "rev-parse", "HEAD"],
         text=True,
-        cwd=Path(__file__).resolve().parents[1],
+        cwd=source_repo or Path(__file__).resolve().parents[1],
     ).strip()
 
 

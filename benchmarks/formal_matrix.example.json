@@ -1,5 +1,6 @@
 {
   "python": "/data/rag/pluo35/nano-vllm-issue175/.venv/bin/python",
+  "benchmark_script": "/data/rag/pluo35/nano-vllm-gpu-metadata/benchmarks/benchmark_decode_hotpath.py",
   "gpu": 1,
   "output_root": "/data/rag/pluo35/nano-vllm-formal-results",
   "gpu_memory_utilization": 0.8,

@@ -39,8 +39,12 @@ def summary_path(output_dir, variant):
 
 
 def build_command(config, variant, model, workload, output_dir, measured_runs, seed):
-    repo = Path(variant["repo"])
-    benchmark = repo / "benchmarks" / "benchmark_decode_hotpath.py"
+    benchmark = Path(
+        config.get(
+            "benchmark_script",
+            Path(variant["repo"]) / "benchmarks" / "benchmark_decode_hotpath.py",
+        )
+    )
     command = [
         config["python"],
         str(benchmark),
@@ -80,6 +84,7 @@ def execute_case(config, variant, model, workload, output_dir, measured_runs, se
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = str(config["gpu"])
     env["PYTHONPATH"] = str(Path(variant["repo"]).resolve())
+    env["NANOVLLM_SOURCE_REPO"] = str(Path(variant["repo"]).resolve())
     env.update({key: str(value) for key, value in variant.get("env", {}).items()})
     command = build_command(
         config, variant, model, workload, output_dir, measured_runs, seed
