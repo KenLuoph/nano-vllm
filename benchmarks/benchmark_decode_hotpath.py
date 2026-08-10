@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import random
+import statistics
 import subprocess
 import time
 from pathlib import Path
@@ -52,8 +53,39 @@ def git_revision():
     ).strip()
 
 
-def run_generation(llm, args, output_tokens: int, run_seed: int):
-    config = AutoConfig.from_pretrained(args.model, local_files_only=True)
+def percentile(values, fraction):
+    if not values:
+        return None
+    ordered = sorted(values)
+    rank = max(0, min(len(ordered) - 1, int((len(ordered) - 1) * fraction + 0.999999)))
+    return ordered[rank]
+
+
+def latency_summary(values):
+    return {
+        "count": len(values),
+        "mean_ms": statistics.fmean(values) if values else None,
+        "p50_ms": percentile(values, 0.50),
+        "p95_ms": percentile(values, 0.95),
+        "p99_ms": percentile(values, 0.99),
+        "max_ms": max(values) if values else None,
+    }
+
+
+def model_revision(model, config):
+    revision = getattr(config, "_commit_hash", None)
+    if revision:
+        return revision
+    resolved = Path(model).expanduser().resolve()
+    parts = resolved.parts
+    if "snapshots" in parts:
+        index = parts.index("snapshots")
+        if index + 1 < len(parts):
+            return parts[index + 1]
+    return f"local:{resolved}"
+
+
+def run_generation(llm, args, config, output_tokens: int, run_seed: int):
     prompts = make_prompts(args.batch_size, args.prompt_tokens, config.vocab_size, run_seed)
     torch.manual_seed(run_seed)
     sampling = SamplingParams(
@@ -61,21 +93,46 @@ def run_generation(llm, args, output_tokens: int, run_seed: int):
         max_tokens=output_tokens,
         ignore_eos=True,
     )
+    request_ids = []
+    for prompt in prompts:
+        llm.add_request(prompt, sampling)
+        request_ids.append(llm.scheduler.waiting[-1].seq_id)
+
     torch.cuda.synchronize()
     started = time.perf_counter()
-    outputs = llm.generate(prompts, sampling, use_tqdm=False)
+    outputs_by_id = {}
+    prefill_step_ms = []
+    decode_step_ms = []
+    token_event_tpot_ms = []
+    while any(seq_id not in outputs_by_id for seq_id in request_ids):
+        step_started = time.perf_counter()
+        finished, num_tokens = llm.step()
+        elapsed_ms = (time.perf_counter() - step_started) * 1000
+        if num_tokens > 0:
+            prefill_step_ms.append(elapsed_ms)
+        else:
+            active_batch = -num_tokens
+            decode_step_ms.append(elapsed_ms)
+            token_event_tpot_ms.extend([elapsed_ms] * active_batch)
+        for seq_id, token_ids in finished:
+            if seq_id in request_ids:
+                outputs_by_id[seq_id] = token_ids
     torch.cuda.synchronize()
     elapsed_s = time.perf_counter() - started
-    generated = sum(len(output["token_ids"]) for output in outputs)
+    outputs = [outputs_by_id[seq_id] for seq_id in request_ids]
+    generated = sum(len(token_ids) for token_ids in outputs)
     digest = hashlib.sha256()
-    for output in outputs:
-        for token_id in output["token_ids"]:
+    for token_ids in outputs:
+        for token_id in token_ids:
             digest.update(int(token_id).to_bytes(8, "little", signed=False))
     return {
         "elapsed_s": elapsed_s,
         "output_tokens": generated,
         "output_tokens_per_s": generated / elapsed_s,
         "token_checksum": digest.hexdigest(),
+        "prefill_step_latency": latency_summary(prefill_step_ms),
+        "decode_step_latency": latency_summary(decode_step_ms),
+        "tpot": latency_summary(token_event_tpot_ms),
     }
 
 
@@ -91,6 +148,7 @@ def main():
 
     max_model_len = args.prompt_tokens + args.output_tokens + 16
     max_num_batched_tokens = max(4096, args.batch_size * args.prompt_tokens)
+    model_config = AutoConfig.from_pretrained(args.model, local_files_only=True)
     llm = LLM(
         args.model,
         enforce_eager=args.enforce_eager,
@@ -101,7 +159,9 @@ def main():
         gpu_memory_utilization=args.gpu_memory_utilization,
     )
 
-    warmup = run_generation(llm, args, args.warmup_output_tokens, args.seed - 1)
+    warmup = run_generation(
+        llm, args, model_config, args.warmup_output_tokens, args.seed - 1
+    )
     llm.model_runner.call("start_profile", str(profile_path), args.variant, args.nvtx)
 
     if args.cuda_profiler_range:
@@ -111,7 +171,9 @@ def main():
     try:
         for run_index in range(args.measured_runs):
             measured.append(
-                run_generation(llm, args, args.output_tokens, args.seed + run_index)
+                run_generation(
+                    llm, args, model_config, args.output_tokens, args.seed + run_index
+                )
             )
     finally:
         if args.cuda_profiler_range:
@@ -123,6 +185,7 @@ def main():
     summary = {
         "variant": args.variant,
         "git_revision": git_revision(),
+        "model_revision": model_revision(args.model, model_config),
         "device": torch.cuda.get_device_name(),
         "torch": torch.__version__,
         "torch_cuda": torch.version.cuda,
