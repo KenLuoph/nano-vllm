@@ -162,6 +162,7 @@ def main():
     warmup = run_generation(
         llm, args, model_config, args.warmup_output_tokens, args.seed - 1
     )
+    torch.cuda.reset_peak_memory_stats()
     llm.model_runner.call("start_profile", str(profile_path), args.variant, args.nvtx)
 
     if args.cuda_profiler_range:
@@ -196,6 +197,10 @@ def main():
             "elapsed_s": total_elapsed,
             "output_tokens": total_tokens,
             "output_tokens_per_s": total_tokens / total_elapsed,
+        },
+        "memory": {
+            "peak_allocated_bytes": torch.cuda.max_memory_allocated(),
+            "peak_reserved_bytes": torch.cuda.max_memory_reserved(),
         },
         "profile": profile_result,
     }

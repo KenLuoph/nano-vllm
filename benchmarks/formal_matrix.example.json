@@ -1,0 +1,64 @@
+{
+  "python": "/data/rag/pluo35/nano-vllm-issue175/.venv/bin/python",
+  "gpu": 1,
+  "output_root": "/data/rag/pluo35/nano-vllm-formal-results",
+  "gpu_memory_utilization": 0.8,
+  "seed": 20260810,
+  "measured_runs": 3,
+  "tie_break_baseline": "main",
+  "tie_break_threshold_percent": 1.0,
+  "tie_break_rounds": 7,
+  "tie_break_candidates": ["pr176", "host-v2", "gpu-metadata"],
+  "variants": [
+    {
+      "name": "eager",
+      "repo": "/data/rag/pluo35/nano-vllm-main",
+      "enforce_eager": true
+    },
+    {
+      "name": "main",
+      "repo": "/data/rag/pluo35/nano-vllm-main"
+    },
+    {
+      "name": "pr176",
+      "repo": "/data/rag/pluo35/nano-vllm-pr176"
+    },
+    {
+      "name": "host-v2",
+      "repo": "/data/rag/pluo35/nano-vllm-host-v2"
+    },
+    {
+      "name": "gpu-metadata",
+      "repo": "/data/rag/pluo35/nano-vllm-gpu-metadata",
+      "env": {
+        "NANOVLLM_PACKED_METADATA": "1"
+      }
+    }
+  ],
+  "models": [
+    {
+      "name": "qwen3-0.6b",
+      "path": "/data/rag/pluo35/models/Qwen3-0.6B"
+    },
+    {
+      "name": "qwen3-1.7b",
+      "path": "/data/rag/pluo35/models/Qwen3-1.7B"
+    },
+    {
+      "name": "qwen3-8b",
+      "path": "/data/rag/pluo35/models/Qwen3-8B",
+      "workloads": ["p128-o256-b1", "p128-o256-b4", "p128-o256-b8"]
+    }
+  ],
+  "workloads": [
+    {"name": "p128-o512-b1", "batch_size": 1, "prompt_tokens": 128, "output_tokens": 512},
+    {"name": "p128-o512-b4", "batch_size": 4, "prompt_tokens": 128, "output_tokens": 512},
+    {"name": "p128-o512-b8", "batch_size": 8, "prompt_tokens": 128, "output_tokens": 512},
+    {"name": "p128-o512-b16", "batch_size": 16, "prompt_tokens": 128, "output_tokens": 512, "nsight": true},
+    {"name": "p2048-o256-b4", "batch_size": 4, "prompt_tokens": 2048, "output_tokens": 256},
+    {"name": "p2048-o256-b16", "batch_size": 16, "prompt_tokens": 2048, "output_tokens": 256},
+    {"name": "p128-o256-b1", "batch_size": 1, "prompt_tokens": 128, "output_tokens": 256},
+    {"name": "p128-o256-b4", "batch_size": 4, "prompt_tokens": 128, "output_tokens": 256},
+    {"name": "p128-o256-b8", "batch_size": 8, "prompt_tokens": 128, "output_tokens": 256}
+  ]
+}
