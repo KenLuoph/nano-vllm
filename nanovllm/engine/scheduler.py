@@ -3,6 +3,7 @@ from collections import deque
 from nanovllm.config import Config
 from nanovllm.engine.sequence import Sequence, SequenceStatus
 from nanovllm.engine.block_manager import BlockManager
+from nanovllm.engine.runtime_slots import RuntimeSlotManager
 
 
 class Scheduler:
@@ -13,6 +14,7 @@ class Scheduler:
         self.eos = config.eos
         self.block_size = config.kvcache_block_size
         self.block_manager = BlockManager(config.num_kvcache_blocks, config.kvcache_block_size)
+        self.runtime_slots = RuntimeSlotManager(config.max_num_seqs)
         self.waiting: deque[Sequence] = deque()
         self.running: deque[Sequence] = deque()
 
@@ -27,7 +29,12 @@ class Scheduler:
         num_batched_tokens = 0
 
         # prefill
-        while self.waiting and len(scheduled_seqs) < self.max_num_seqs:
+        # Runtime slots are owned for the full RUNNING lifetime, so new prefill
+        # requests may only consume capacity not already held by running requests.
+        while (
+            self.waiting
+            and len(self.running) + len(scheduled_seqs) < self.max_num_seqs
+        ):
             seq = self.waiting[0]
             remaining = self.max_num_batched_tokens - num_batched_tokens
             if remaining == 0:
@@ -47,6 +54,7 @@ class Scheduler:
             num_batched_tokens += seq.num_scheduled_tokens
             if seq.num_cached_tokens + seq.num_scheduled_tokens == seq.num_tokens:
                 seq.status = SequenceStatus.RUNNING
+                self.runtime_slots.acquire(seq)
                 self.waiting.popleft()
                 self.running.append(seq)
             scheduled_seqs.append(seq)
@@ -75,6 +83,7 @@ class Scheduler:
     def preempt(self, seq: Sequence):
         seq.status = SequenceStatus.WAITING
         seq.is_prefill = True
+        self.runtime_slots.release(seq)
         self.block_manager.deallocate(seq)
         self.waiting.appendleft(seq)
 
@@ -88,5 +97,6 @@ class Scheduler:
             seq.append_token(token_id)
             if (not seq.ignore_eos and token_id == self.eos) or seq.num_completion_tokens == seq.max_tokens:
                 seq.status = SequenceStatus.FINISHED
+                self.runtime_slots.release(seq)
                 self.block_manager.deallocate(seq)
                 self.running.remove(seq)

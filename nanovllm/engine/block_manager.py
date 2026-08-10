@@ -89,9 +89,11 @@ class BlockManager:
             seq.block_table.append(block_id)
         for i in range(num_cached_blocks, seq.num_blocks):
             seq.block_table.append(self._allocate_block())
+        seq.block_table_version += 1
         seq.num_cached_tokens = num_cached_blocks * self.block_size
 
     def deallocate(self, seq: Sequence):
+        had_blocks = bool(seq.block_table)
         for block_id in reversed(seq.block_table):
             block = self.blocks[block_id]
             block.ref_count -= 1
@@ -99,6 +101,8 @@ class BlockManager:
                 self._deallocate_block(block_id)
         seq.num_cached_tokens = 0
         seq.block_table.clear()
+        if had_blocks:
+            seq.block_table_version += 1
 
     def can_append(self, seq: Sequence) -> bool:
         return len(self.free_block_ids) >= (len(seq) % self.block_size == 1)
@@ -106,6 +110,7 @@ class BlockManager:
     def may_append(self, seq: Sequence):
         if len(seq) % self.block_size == 1:
             seq.block_table.append(self._allocate_block())
+            seq.block_table_version += 1
 
     def hash_blocks(self, seq: Sequence):
         start = seq.num_cached_tokens // self.block_size
