@@ -1,4 +1,5 @@
 import pickle
+import os
 import torch
 import torch.distributed as dist
 from multiprocessing.synchronize import Event
@@ -6,6 +7,9 @@ from multiprocessing.shared_memory import SharedMemory
 
 from nanovllm.config import Config
 from nanovllm.engine.decode_input_batch import DecodeInputBatch
+from nanovllm.engine.gpu_block_table import GpuBlockTableMirror
+from nanovllm.engine.packed_decode_kernels import launch_packed_decode_kernels
+from nanovllm.engine.packed_decode_metadata import PackedDecodeMetadata
 from nanovllm.engine.sequence import Sequence
 from nanovllm.models.qwen3 import Qwen3ForCausalLM
 from nanovllm.layers.sampler import Sampler
@@ -24,6 +28,10 @@ class ModelRunner:
         self.world_size = config.tensor_parallel_size
         self.rank = rank
         self.event = event
+        self.packed_metadata_enabled = (
+            os.environ.get("NANOVLLM_PACKED_METADATA", "0") == "1"
+            and not self.enforce_eager
+        )
         self.decode_profiler = DecodeProfiler(rank)
 
         dist.init_process_group("nccl", "tcp://localhost:2333", world_size=self.world_size, rank=rank)
@@ -187,6 +195,35 @@ class ModelRunner:
 
     def prepare_decode(self, seqs: list[Sequence]):
         with self.decode_profiler.range("prepare_decode", "prepare_decode_cpu_ms"):
+            if self.packed_metadata_enabled and len(seqs) <= 512:
+                batch_size = len(seqs)
+                graph_bucket = next(x for x in self.graph_bs if x >= batch_size)
+                deltas = self.gpu_block_table_mirror.plan_deltas(seqs)
+                view = self.packed_decode_metadata.prepare(
+                    seqs,
+                    graph_bucket,
+                    deltas,
+                    include_temperatures=self.rank == 0,
+                )
+                self.packed_decode_metadata.copy_to_gpu(view.active_bytes)
+                self.decode_profiler.update(
+                    cuda_graph=True,
+                    graph_bucket=graph_bucket,
+                    active_block_width=view.active_block_width,
+                    copied_block_table_bytes=0,
+                    padding_rows=view.padding_rows,
+                    decode_tensor_allocations=0,
+                    metadata_d2d_copies=0,
+                    packed_metadata_h2d_submissions=1,
+                    packed_metadata_h2d_bytes=view.active_bytes,
+                    block_table_delta_count=view.num_deltas,
+                )
+                set_context(False)
+                return (
+                    self.graph_vars["input_ids"][:batch_size],
+                    self.graph_vars["positions"][:batch_size],
+                )
+
             if (
                 not self.enforce_eager
                 and hasattr(self, "decode_input_batch")
@@ -242,6 +279,12 @@ class ModelRunner:
         with self.decode_profiler.range("prepare_sample", "prepare_sample_cpu_ms"):
             if (
                 not is_prefill
+                and self.packed_metadata_enabled
+                and len(seqs) <= 512
+            ):
+                return self.packed_decode_metadata.temperatures_gpu[: len(seqs)]
+            if (
+                not is_prefill
                 and not self.enforce_eager
                 and hasattr(self, "decode_input_batch")
                 and len(seqs) <= 512
@@ -268,7 +311,11 @@ class ModelRunner:
                 graph_block_table_capacity=self.graph_vars["block_tables"].size(1),
             )
             with self.decode_profiler.range("graph_input_copy", "graph_input_copy_cpu_ms"):
-                if input_ids.device.type == "cpu" and hasattr(self, "decode_input_batch"):
+                if self.packed_metadata_enabled:
+                    view = self.packed_decode_metadata.last_view
+                    if view is None or view.batch_size != bs or view.graph_bucket != graph_bucket:
+                        raise RuntimeError("packed CUDA graph metadata does not match the batch")
+                elif input_ids.device.type == "cpu" and hasattr(self, "decode_input_batch"):
                     decode_batch = self.decode_input_batch
                     view = decode_batch.last_view
                     if view is None or view.batch_size != bs or view.graph_bucket != graph_bucket:
@@ -334,22 +381,6 @@ class ModelRunner:
         context_lens = torch.zeros(max_bs, dtype=torch.int32)
         block_tables = torch.zeros(max_bs, max_num_blocks, dtype=torch.int32)
         outputs = torch.zeros(max_bs, hf_config.hidden_size)
-        self.graph_bs = [1, 2, 4, 8] + list(range(16, max_bs + 1, 16))
-        self.graphs = {}
-        self.graph_pool = None
-
-        for bs in reversed(self.graph_bs):
-            graph = torch.cuda.CUDAGraph()
-            set_context(False, slot_mapping=slot_mapping[:bs], context_lens=context_lens[:bs], block_tables=block_tables[:bs])
-            outputs[:bs] = self.model(input_ids[:bs], positions[:bs])    # warmup
-            with torch.cuda.graph(graph, self.graph_pool):
-                outputs[:bs] = self.model(input_ids[:bs], positions[:bs])    # capture
-            if self.graph_pool is None:
-                self.graph_pool = graph.pool()
-            self.graphs[bs] = graph
-            torch.cuda.synchronize()
-            reset_context()
-
         self.graph_vars = dict(
             input_ids=input_ids,
             positions=positions,
@@ -358,13 +389,61 @@ class ModelRunner:
             block_tables=block_tables,
             outputs=outputs,
         )
+        if self.packed_metadata_enabled:
+            with torch.inference_mode(False):
+                self.packed_decode_metadata = PackedDecodeMetadata(
+                    max_bs,
+                    max_num_blocks,
+                    self.block_size,
+                    pin_memory=True,
+                    device="cuda",
+                )
+                self.gpu_block_table_mirror = GpuBlockTableMirror(
+                    max_bs,
+                    max_num_blocks,
+                    device="cuda",
+                )
+                self.packed_decode_metadata.gpu_blob.copy_(
+                    self.packed_decode_metadata.cpu_blob
+                )
+        self.graph_bs = [1, 2, 4, 8] + list(range(16, max_bs + 1, 16))
+        self.graphs = {}
+        self.graph_pool = None
+
+        for bs in reversed(self.graph_bs):
+            graph = torch.cuda.CUDAGraph()
+            set_context(False, slot_mapping=slot_mapping[:bs], context_lens=context_lens[:bs], block_tables=block_tables[:bs])
+            if self.packed_metadata_enabled:
+                launch_packed_decode_kernels(
+                    self.packed_decode_metadata,
+                    self.gpu_block_table_mirror,
+                    self.graph_vars,
+                    bs,
+                )
+            outputs[:bs] = self.model(input_ids[:bs], positions[:bs])    # warmup
+            with torch.cuda.graph(graph, self.graph_pool):
+                if self.packed_metadata_enabled:
+                    launch_packed_decode_kernels(
+                        self.packed_decode_metadata,
+                        self.gpu_block_table_mirror,
+                        self.graph_vars,
+                        bs,
+                    )
+                outputs[:bs] = self.model(input_ids[:bs], positions[:bs])    # capture
+            if self.graph_pool is None:
+                self.graph_pool = graph.pool()
+            self.graphs[bs] = graph
+            torch.cuda.synchronize()
+            reset_context()
+
         # Decode metadata is updated outside inference mode between graph replays.
-        with torch.inference_mode(False):
-            self.decode_input_batch = DecodeInputBatch(
-                max_bs,
-                max_num_blocks,
-                self.block_size,
-                pin_memory=True,
-                allocate_temperature_gpu=self.rank == 0,
-                device="cuda",
-            )
+        if not self.packed_metadata_enabled:
+            with torch.inference_mode(False):
+                self.decode_input_batch = DecodeInputBatch(
+                    max_bs,
+                    max_num_blocks,
+                    self.block_size,
+                    pin_memory=True,
+                    allocate_temperature_gpu=self.rank == 0,
+                    device="cuda",
+                )

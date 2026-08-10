@@ -65,6 +65,9 @@ def summarize(path: Path):
         "padding_rows",
         "decode_tensor_allocations",
         "metadata_d2d_copies",
+        "packed_metadata_h2d_submissions",
+        "packed_metadata_h2d_bytes",
+        "block_table_delta_count",
     ):
         values = [record[metric] for record in decode if metric in record]
         if values:

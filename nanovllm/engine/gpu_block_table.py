@@ -40,7 +40,7 @@ class GpuBlockTableMirror:
         self.seen_epochs = np.zeros(max_num_seqs, dtype=np.int64)
         self.seen_versions = np.full(max_num_seqs, -1, dtype=np.int64)
 
-    def synchronize(self, seqs: list[Sequence]) -> list[BlockTableDelta]:
+    def plan_deltas(self, seqs: list[Sequence]) -> list[BlockTableDelta]:
         deltas = []
         for seq in seqs:
             slot = seq.runtime_slot
@@ -77,11 +77,13 @@ class GpuBlockTableMirror:
             self.host_rows[slot] = new_row
             self.seen_epochs[slot] = seq.runtime_slot_epoch
             self.seen_versions[slot] = seq.block_table_version
-            # This is intentionally a clear PyTorch reference. Day 7 replaces it
-            # with packed deltas consumed by a captured Triton kernel.
-            self.master_block_tables[slot].copy_(
-                torch.from_numpy(new_row).to(self.device)
-            )
+        return deltas
+
+    def synchronize(self, seqs: list[Sequence]) -> list[BlockTableDelta]:
+        """Apply planned changes with PyTorch as a correctness reference."""
+        deltas = self.plan_deltas(seqs)
+        for delta in deltas:
+            self.master_block_tables[delta.runtime_slot, delta.column] = delta.block_id
         return deltas
 
     def gather_reference(
